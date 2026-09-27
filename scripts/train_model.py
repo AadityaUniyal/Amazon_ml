@@ -50,9 +50,8 @@ def main():
     print(f"Loading ground truth from {gt_file}...")
     t0 = time.time()
     
-    # Use 4,000 training S1 entities (~80,000 candidate pairs: 11,000+ positives, 69,000+ hard negatives)
-    # Complete end-to-end execution in ~5.5 seconds (synchronous guarantee)
-    NUM_TRAIN_S1 = 4000
+    # Scale to 25,000 reference entities (~300,000+ candidate pairs with hard negative mining)
+    NUM_TRAIN_S1 = 25000
     gt = {}
     with open(gt_file, "r", encoding="utf-8") as f:
         reader = csv.reader(f, delimiter="\t")
@@ -93,7 +92,7 @@ def main():
             next(reader)
             for i, row in enumerate(reader):
                 # Always load positive targets + sample background records
-                if row[0] in needed_targets or i < 15000:
+                if row[0] in needed_targets or i < 30000:
                     target_recs[row[0]] = normalize_record(row[0], row[1], row[2], row[3] if len(row) > 3 else "")
 
     print(f"Total target candidate pool: {len(target_recs):,} records.")
@@ -149,7 +148,7 @@ def main():
     print(f"Generated {len(val_pairs):,} validation pairs.")
 
     # 7. Feature Extraction
-    print("\nExtracting 21D features for train set...")
+    print("\nExtracting 27D features for train set...")
     t0 = time.time()
     X_train = [
         extract_pair_features(s1_recs[sid], target_recs[tid], sc)
@@ -158,7 +157,7 @@ def main():
     y_train = np.array([p[2] for p in train_pairs], dtype=int)
     print(f"Extracted train features in {time.time()-t0:.2f}s.")
 
-    print("Extracting 21D features for validation set...")
+    print("Extracting 27D features for validation set...")
     t0 = time.time()
     X_val = [
         extract_pair_features(s1_recs[sid], target_recs[tid], sc)
@@ -167,21 +166,22 @@ def main():
     y_val = np.array([p[2] for p in val_pairs], dtype=int)
     print(f"Extracted validation features in {time.time()-t0:.2f}s.")
 
-    # 8. Train LightGBM Classifier
-    print("\nTraining LightGBM GBDT Matching Classifier...")
+    # 8. Train LightGBM Classifier with Cost-Sensitive Asymmetric Loss
+    print("\nTraining Cost-Sensitive LightGBM GBDT Matching Classifier (w_fp=4.0)...")
     t0 = time.time()
+    sample_weights = np.where(y_train == 1, 1.0, 4.0)
     model = lgb.LGBMClassifier(
-        n_estimators=300,
-        learning_rate=0.07,
-        num_leaves=35,
-        max_depth=7,
-        min_child_samples=30,
+        n_estimators=350,
+        learning_rate=0.06,
+        num_leaves=40,
+        max_depth=8,
+        min_child_samples=40,
         subsample=0.85,
         colsample_bytree=0.85,
         random_state=42,
         n_jobs=-1
     )
-    model.fit(X_train, y_train)
+    model.fit(X_train, y_train, sample_weight=sample_weights)
     print(f"Model trained in {time.time()-t0:.2f}s.")
 
     # 9. Out-of-fold Evaluation & Threshold Optimization
@@ -211,15 +211,18 @@ def main():
     # 10. Save Artifacts
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     model_path = os.path.join(project_root, "artifacts", "models", "lgbm_er_model.pkl")
+    model_path2 = os.path.join(project_root, "models", "lgbm_er_model.pkl")
     config_path = os.path.join(project_root, "configs", "final.json")
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
+    os.makedirs(os.path.dirname(model_path2), exist_ok=True)
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
 
-    with open(model_path, "wb") as f:
-        pickle.dump(model, f)
-        f.flush()
-        os.fsync(f.fileno())
-    print(f"\nSaved trained model to {model_path} (size: {os.path.getsize(model_path)})")
+    for mp in [model_path, model_path2]:
+        with open(mp, "wb") as f:
+            pickle.dump(model, f)
+            f.flush()
+            os.fsync(f.fileno())
+        print(f"Saved trained model to {mp} (size: {os.path.getsize(mp)})")
 
     config_data = {
         "model_type": "LightGBM",
@@ -229,8 +232,8 @@ def main():
         "blocking_recall_val": float(blocker_recall),
         "singleton_acc_val": float(singleton_acc),
         "max_candidates": 25,
-        "n_estimators": 300,
-        "learning_rate": 0.07
+        "n_estimators": 350,
+        "learning_rate": 0.06
     }
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config_data, f, indent=2)

@@ -19,10 +19,13 @@ def get_char_ngrams(text, n=3):
     return [text[i:i+n] for i in range(len(text) - n + 1)]
 
 class MultiChannelBlocker:
-    def __init__(self, df_cap=3000, max_candidates=25, use_char_ngrams=False):
+    def __init__(self, df_cap=3000, max_candidates=25, use_char_ngrams=False, min_score=3, relative_margin=0.35, dynamic_pruning=True):
         self.df_cap = df_cap
         self.max_candidates = max_candidates
         self.use_char_ngrams = use_char_ngrams
+        self.min_score = min_score
+        self.relative_margin = relative_margin
+        self.dynamic_pruning = dynamic_pruning
         
         # Inverted index channels
         self.name_exact_idx = defaultdict(list)
@@ -33,76 +36,86 @@ class MultiChannelBlocker:
         self.name_char_ngram_idx = defaultdict(list) if use_char_ngrams else None
         self.addr_token_idx = defaultdict(list)
         self.num_word_idx = defaultdict(list)
+        self.addr_num_word_idx = defaultdict(list)
+        self.rare_addr_word_idx = defaultdict(list)
         
-        self.token_df = Counter()
         self.char_ngram_df = Counter() if use_char_ngrams else None
-        self.indexed_targets = {}
+
+    def add_target(self, tid, rec):
+        """
+        Incrementally indexes a single target record into sparse inverted channels.
+        Automatically caps hub tokens for zero-overhead streaming indexing.
+        """
+        n_norm = rec.get('name_norm', '')
+        n_nosuf = rec.get('name_norm_nosuffix', '')
+        n_compact = rec.get('name_compact', '')
+        n_sorted = rec.get('name_sorted', '')
+        
+        # Channel 1: Exact clean name
+        if n_norm:
+            self.name_exact_idx[n_norm].append(tid)
+        # Channel 2: No-suffix name
+        if n_nosuf:
+            self.name_nosuffix_idx[n_nosuf].append(tid)
+        # Channel 3: Compact name
+        if n_compact:
+            self.name_compact_idx[n_compact].append(tid)
+        # Channel 4: Sorted token name
+        if n_sorted:
+            self.name_sorted_idx[n_sorted].append(tid)
+            
+        # Channel 5: Distinctive name tokens
+        toks = rec.get('name_tokens_nosuffix') or rec.get('name_tokens', [])
+        for w in toks:
+            l = self.name_token_idx[w]
+            if len(l) < self.df_cap:
+                l.append(tid)
+                
+        # Channel 6: Character n-grams (optional)
+        if self.use_char_ngrams and n_nosuf:
+            for ng in set(get_char_ngrams(n_nosuf, 3)):
+                l = self.name_char_ngram_idx[ng]
+                if len(l) < 1500:
+                    l.append(tid)
+                    
+        # Channel 7: Numeric address tokens & building/PIN anchors
+        for w in rec.get('address_tokens', []):
+            if any(c.isdigit() for c in w):
+                l = self.addr_token_idx[w]
+                if len(l) < self.df_cap:
+                    l.append(tid)
+                
+        # Channel 8: Composite (Number, First Word) anchor
+        nums = rec.get('numbers', set())
+        if nums and toks:
+            first_w = toks[0]
+            for num in nums:
+                l = self.num_word_idx[(num, first_w)]
+                if len(l) < 500:
+                    l.append(tid)
+
+        # Channel 9: Address-Dominant Composite Channel (Number, Address Word)
+        # Rescues DBA and trade names sharing building/shop/suite
+        sig_addr = rec.get('address_sig', [])
+        if nums and sig_addr:
+            for num in nums:
+                for aw in sig_addr[:3]:
+                    l = self.addr_num_word_idx[(num, aw)]
+                    if len(l) < 200:
+                        l.append(tid)
+
+        # Channel 10: Rare address tokens (Plaza, locality, estate names)
+        for aw in sig_addr:
+            l = self.rare_addr_word_idx[aw]
+            if len(l) < 150:
+                l.append(tid)
 
     def fit_targets(self, targets):
         """
         Indexes target records (S2 and S3) for a specific country or open set.
         """
-        self.indexed_targets = targets
-        
-        # 1. Estimate document frequencies for tokens
         for tid, rec in targets.items():
-            toks = rec.get('name_tokens_nosuffix') or rec.get('name_tokens', [])
-            for w in set(toks):
-                self.token_df[('n', w)] += 1
-            for w in set(rec.get('address_tokens', [])):
-                self.token_df[('a', w)] += 1
-                
-            if self.use_char_ngrams:
-                fcn = rec.get('name_norm_nosuffix', '')
-                if fcn:
-                    ngrams = set(get_char_ngrams(fcn, 3))
-                    for ng in ngrams:
-                        self.char_ngram_df[ng] += 1
-
-        # 2. Build multi-channel inverted indexes
-        for tid, rec in targets.items():
-            n_norm = rec.get('name_norm', '')
-            n_nosuf = rec.get('name_norm_nosuffix', '')
-            n_compact = rec.get('name_compact', '')
-            n_sorted = rec.get('name_sorted', '')
-            
-            # Channel 1: Exact clean name
-            if n_norm:
-                self.name_exact_idx[n_norm].append(tid)
-            # Channel 2: No-suffix name
-            if n_nosuf:
-                self.name_nosuffix_idx[n_nosuf].append(tid)
-            # Channel 3: Compact name
-            if n_compact:
-                self.name_compact_idx[n_compact].append(tid)
-            # Channel 4: Sorted token name
-            if n_sorted:
-                self.name_sorted_idx[n_sorted].append(tid)
-                
-            # Channel 5: Distinctive name tokens
-            toks = rec.get('name_tokens_nosuffix') or rec.get('name_tokens', [])
-            for w in toks:
-                if self.token_df[('n', w)] <= self.df_cap:
-                    self.name_token_idx[w].append(tid)
-                    
-            # Channel 6: Character n-grams (optional)
-            if self.use_char_ngrams and n_nosuf:
-                for ng in set(get_char_ngrams(n_nosuf, 3)):
-                    if 5 <= self.char_ngram_df[ng] <= 1500:
-                        self.name_char_ngram_idx[ng].append(tid)
-                        
-            # Channel 7: Address tokens & alphanumeric building anchors
-            for w in rec.get('address_tokens', []):
-                if self.token_df[('a', w)] <= self.df_cap:
-                    self.addr_token_idx[w].append(tid)
-                    
-            # Channel 8: Composite (Number, First Word) anchor
-            nums = rec.get('numbers', set())
-            if nums and toks:
-                first_w = toks[0]
-                if self.token_df[('n', first_w)] <= self.df_cap:
-                    for num in nums:
-                        self.num_word_idx[(num, first_w)].append(tid)
+            self.add_target(tid, rec)
 
     def retrieve_candidates_with_scores(self, s1_rec):
         """
@@ -142,22 +155,24 @@ class MultiChannelBlocker:
         # Pass 5: Distinctive name tokens (IDF-weighted)
         toks = s1_rec.get('name_tokens_nosuffix') or s1_rec.get('name_tokens', [])
         for w in toks:
-            df = self.token_df.get(('n', w), 0)
-            if 0 < df <= self.df_cap:
-                weight = 5 if df <= 30 else (3 if df <= 200 else 1)
-                for tid in self.name_token_idx[w]:
-                    if tid != s1_id:
-                        cand_scores[tid] += weight
+            if w in self.name_token_idx:
+                df = len(self.name_token_idx[w])
+                if 0 < df <= self.df_cap:
+                    weight = 5 if df <= 30 else (3 if df <= 200 else 1)
+                    for tid in self.name_token_idx[w]:
+                        if tid != s1_id:
+                            cand_scores[tid] += weight
 
         # Pass 6: Character 3-gram retrieval (for spelling noise and OCR)
         if self.use_char_ngrams and n_nosuf:
             for ng in set(get_char_ngrams(n_nosuf, 3)):
-                df = self.char_ngram_df.get(ng, 0)
-                if 5 <= df <= 1500:
-                    weight = 2 if df <= 100 else 1
-                    for tid in self.name_char_ngram_idx[ng]:
-                        if tid != s1_id:
-                            cand_scores[tid] += weight
+                if ng in self.name_char_ngram_idx:
+                    df = len(self.name_char_ngram_idx[ng])
+                    if 5 <= df <= 1500:
+                        weight = 2 if df <= 100 else 1
+                        for tid in self.name_char_ngram_idx[ng]:
+                            if tid != s1_id:
+                                cand_scores[tid] += weight
 
         # Pass 7: Composite (Number, First Word) anchor
         nums = s1_rec.get('numbers', set())
@@ -170,16 +185,53 @@ class MultiChannelBlocker:
                         if tid != s1_id:
                             cand_scores[tid] += 10
 
-        # Pass 8: Address tokens & alphanumeric building anchors (IDF-weighted)
+        # Pass 8: Numeric address tokens & building/PIN anchors (IDF-weighted)
         for w in s1_rec.get('address_tokens', []):
-            df = self.token_df.get(('a', w), 0)
-            if 0 < df <= self.df_cap:
-                weight = 5 if any(c.isdigit() for c in w) else (3 if df <= 100 else 1)
-                for tid in self.addr_token_idx[w]:
-                    if tid != s1_id:
-                        cand_scores[tid] += weight
+            if any(c.isdigit() for c in w) and w in self.addr_token_idx:
+                df = len(self.addr_token_idx[w])
+                if 0 < df <= self.df_cap:
+                    weight = 5 if df <= 30 else 3
+                    for tid in self.addr_token_idx[w]:
+                        if tid != s1_id:
+                            cand_scores[tid] += weight
 
-        return cand_scores.most_common(self.max_candidates)
+        # Pass 9: Address-Dominant Composite Channel (Number, Address Word)
+        sig_addr = s1_rec.get('address_sig', [])
+        if nums and sig_addr:
+            for num in nums:
+                for aw in sig_addr[:3]:
+                    key = (num, aw)
+                    if key in self.addr_num_word_idx:
+                        for tid in self.addr_num_word_idx[key]:
+                            if tid != s1_id:
+                                cand_scores[tid] += 12
+
+        # Pass 10: Rare address locality words
+        for aw in sig_addr:
+            if aw in self.rare_addr_word_idx:
+                df = len(self.rare_addr_word_idx[aw])
+                if 0 < df <= 50:
+                    for tid in self.rare_addr_word_idx[aw]:
+                        if tid != s1_id:
+                            cand_scores[tid] += 3
+
+        top_candidates = cand_scores.most_common(self.max_candidates)
+        if not self.dynamic_pruning or not top_candidates:
+            return top_candidates
+
+        max_score = top_candidates[0][1]
+        if max_score < self.min_score:
+            return []
+
+        threshold = max(self.min_score, max_score * self.relative_margin)
+        filtered = [(tid, s) for tid, s in top_candidates if s >= threshold]
+        
+        # Tie-breaker candidate minimization:
+        # If top candidate is dominant (score >= 28) and second candidate is weak (< 0.40 * max_score), truncate
+        if len(filtered) > 2 and max_score >= 28 and filtered[1][1] < 0.40 * max_score:
+            return filtered[:2]
+
+        return filtered
 
     def retrieve_candidates(self, s1_rec):
         """

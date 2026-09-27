@@ -24,5 +24,11 @@ class TestBlocking(unittest.TestCase):
         self.assertIn("S3-202", cands)
         self.assertNotIn("S1-001", cands)  # No self matches
 
+    def test_singleton_dynamic_pruning(self):
+        # Entity with completely disjoint tokens should produce zero candidates (singleton)
+        s1_singleton = normalize_record("S1-999", "Zilch Nonexistent Enterprises", "9999 Faraway Blvd, Nowhere", "US")
+        cands = self.blocker.retrieve_candidates(s1_singleton)
+        self.assertEqual(len(cands), 0)
+
 if __name__ == '__main__':
     unittest.main()

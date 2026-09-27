@@ -1,11 +1,11 @@
 {
   "model_type": "LightGBM",
-  "threshold": 0.7999999999999999,
-  "macro_f05_val": 0.9819367111657078,
-  "pairwise_acc_val": 0.99735,
-  "blocking_recall_val": 0.9784435513335769,
-  "singleton_acc_val": 0.975,
+  "threshold": 0.4,
+  "macro_f05_val": 0.9337701753053569,
+  "pairwise_acc_val": 0.9923850965460974,
+  "blocking_recall_val": 0.8167210060549605,
+  "singleton_acc_val": 0.9566666666666667,
   "max_candidates": 25,
-  "n_estimators": 300,
-  "learning_rate": 0.07
+  "n_estimators": 350,
+  "learning_rate": 0.06
 }

@@ -26,5 +26,12 @@ class TestNormalization(unittest.TestCase):
         self.assertTrue(any('160' in n for n in res['numbers']))
         self.assertTrue(any('5' in n for n in res['numbers']))
 
+    def test_indic_transliteration(self):
+        text_odia = "ଶକ୍ତି ଆଗ୍ରୋ ଲିମିଟେଡ୍"
+        norm = normalize_text(text_odia)
+        self.assertIn("shkti", norm)
+        self.assertIn("limited", norm)
+
 if __name__ == '__main__':
     unittest.main()
+

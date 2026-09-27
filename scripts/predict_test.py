@@ -20,10 +20,40 @@ import numpy as np
 
 # Ensure project root is in sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(line_buffering=True)
 
 from src.normalization import normalize_record, normalize_country
 from src.blocking import MultiChannelBlocker
 from src.features import extract_pair_features
+
+class CompactTarget:
+    """Lightweight zero-overhead target record to prevent RAM bloat on large test pools."""
+    __slots__ = ('name_norm', 'name_norm_nosuffix', 'address_norm', 'numbers', 'postal_code', 'address_sig', 'country', '_name_tokens', '_address_tokens')
+    def __init__(self, name_norm, name_norm_nosuffix, address_norm, numbers, postal_code="", address_sig=None, country=""):
+        self.name_norm = name_norm
+        self.name_norm_nosuffix = name_norm_nosuffix
+        self.address_norm = address_norm
+        self.numbers = numbers
+        self.postal_code = postal_code
+        self.address_sig = address_sig or []
+        self.country = country
+        self._name_tokens = None
+        self._address_tokens = None
+    @property
+    def name_tokens(self):
+        if self._name_tokens is None:
+            self._name_tokens = self.name_norm.split()
+        return self._name_tokens
+    @property
+    def address_tokens(self):
+        if self._address_tokens is None:
+            self._address_tokens = self.address_norm.split()
+        return self._address_tokens
+    def __getitem__(self, key):
+        return getattr(self, key)
+    def get(self, key, default=None):
+        return getattr(self, key, default)
 
 def run_country_inference(country, test_dir, project_root, model, threshold, max_cands, batch_size, sample=None):
     print(f"\n{'='*60}")
@@ -54,12 +84,15 @@ def run_country_inference(country, test_dir, project_root, model, threshold, max
 
     print(f"Loaded {len(s1_records):,} S1 entities for {country.upper()} in {time.time()-t_start:.2f}s.")
 
-    # 2. Fast scan targets for this country
+    # 2. Single-pass fast streaming target indexing into MultiChannelBlocker
+    blocker = MultiChannelBlocker(df_cap=500, max_candidates=max_cands, use_char_ngrams=False)
     target_files = [
         os.path.join(test_dir, "test_source2.tsv"),
         os.path.join(test_dir, "test_source3.tsv")
     ]
     country_targets = {}
+    print(f"Loading targets and streaming into MultiChannelBlocker for {country.upper()}...")
+    t_targets = time.time()
     for tf in target_files:
         fname = os.path.basename(tf)
         t_f = time.time()
@@ -73,23 +106,26 @@ def run_country_inference(country, test_dir, project_root, model, threshold, max
                     if normalize_country(c_raw) == country:
                         parts = line.rstrip("\r\n").split("\t")
                         tid = parts[0]
-                        country_targets[tid] = normalize_record(
+                        norm_rec = normalize_record(
                             tid,
                             parts[1] if len(parts) > 1 else "",
                             parts[2] if len(parts) > 2 else "",
                             c_raw
                         )
+                        blocker.add_target(tid, norm_rec)
+                        country_targets[tid] = CompactTarget(
+                            norm_rec['name_norm'],
+                            norm_rec.get('name_norm_nosuffix', ''),
+                            norm_rec['address_norm'],
+                            norm_rec['numbers'],
+                            norm_rec.get('postal_code', ''),
+                            norm_rec.get('address_sig', []),
+                            c_raw
+                        )
                         count += 1
-        print(f"  Loaded {count:,} targets from {fname} in {time.time()-t_f:.2f}s.")
+        print(f"  Indexed {count:,} targets from {fname} in {time.time()-t_f:.2f}s.")
 
-    print(f"Total target pool for {country.upper()}: {len(country_targets):,} records.")
-
-    # 3. Fit MultiChannelBlocker (no char ngrams for 10x speed & 70% RAM reduction)
-    print(f"Fitting MultiChannelBlocker on {len(country_targets):,} targets...")
-    t_b = time.time()
-    blocker = MultiChannelBlocker(df_cap=3000, max_candidates=max_cands, use_char_ngrams=False)
-    blocker.fit_targets(country_targets)
-    print(f"Blocker indexed in {time.time()-t_b:.2f}s.")
+    print(f"Total target pool for {country.upper()}: {len(country_targets):,} records in {time.time()-t_targets:.2f}s.")
 
     # 4. Batch candidate retrieval and scoring
     print(f"Scoring S1 entities with LightGBM (threshold={threshold:.2f})...")
@@ -146,10 +182,10 @@ def run_country_inference(country, test_dir, project_root, model, threshold, max
                 match_dict[s1_id] = []
 
         processed = min(b_start + batch_size, len(s1_records))
-        if processed % 50000 == 0 or processed == len(s1_records):
+        if processed % 15000 == 0 or processed == len(s1_records):
             elapsed = time.time() - t_score
             speed = processed / max(0.1, elapsed)
-            print(f"  Progress: {processed:,} / {len(s1_records):,} ({speed:.0f} entities/s) | Matches: {total_matches:,}")
+            print(f"  Progress: {processed:,} / {len(s1_records):,} ({speed:.0f} entities/s) | Matches: {total_matches:,} | Candidates: {total_cands:,}", flush=True)
 
     # 5. Persist country predictions to disk
     pred_dir = os.path.join(project_root, "artifacts", "predictions")
