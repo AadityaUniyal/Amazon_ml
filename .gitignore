@@ -13,7 +13,7 @@ submissions/**/*.tsv
 *.tar.gz
 
 # Model binary weights (keep small configs in git, store models in artifacts locally)
-artifacts/models/*.pkl
+artifacts/
 *.pkl
 *.joblib
 

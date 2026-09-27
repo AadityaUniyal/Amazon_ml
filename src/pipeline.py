@@ -16,13 +16,14 @@ class EntityResolutionPipeline:
         self.blocker.fit_targets(target_records_dict)
         
     def predict_s1_entity(self, s1_norm_rec):
-        candidate_ids = self.blocker.retrieve_candidates(s1_norm_rec)
-        if not candidate_ids:
+        cand_pairs = self.blocker.retrieve_candidates_with_scores(s1_norm_rec)
+        if not cand_pairs:
             return [], []
             
+        candidate_ids = [cid for cid, _ in cand_pairs]
         features = [
-            extract_pair_features(s1_norm_rec, self.blocker.indexed_targets[cid], 10.0)
-            for cid in candidate_ids
+            extract_pair_features(s1_norm_rec, self.blocker.indexed_targets[cid], score)
+            for cid, score in cand_pairs
         ]
         
         probs = score_candidate_pairs(self.model, features)

@@ -1,4 +1,11 @@
 {
-  "best_threshold": 0.6500000000000001,
-  "best_val_f05": 0.9187800072691574
+  "model_type": "LightGBM",
+  "threshold": 0.7999999999999999,
+  "macro_f05_val": 0.9819367111657078,
+  "pairwise_acc_val": 0.99735,
+  "blocking_recall_val": 0.9784435513335769,
+  "singleton_acc_val": 0.975,
+  "max_candidates": 25,
+  "n_estimators": 300,
+  "learning_rate": 0.07
 }
