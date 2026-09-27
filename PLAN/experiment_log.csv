@@ -5,3 +5,4 @@ A02,2026-09-26,Role A,multi_channel_inverted_index+idf,94.48%,25.0,N/A,N/A,N/A,c
 B01,2026-09-26,Role B,multi_channel,94.48%,25.0,LightGBM,0.50,0.9153,completed
 B02,2026-09-26,Role B,multi_channel,94.48%,25.0,LightGBM,0.60,0.9185,completed
 B03,2026-09-26,Role B,multi_channel,94.48%,25.0,LightGBM,0.65,0.9188,completed
+B04,2026-09-26,Production,8_channel_multi_index,97.84%,25.0,LightGBM_21D,0.80,0.9819,completed
